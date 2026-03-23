@@ -133,48 +133,82 @@ def _merge_intent(question: str, data: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def classify_question(question: str) -> Dict[str, Any]:
-    local_intent = _rule_based_intent(question)
-    if local_intent.get("query_type") != "unsupported":
-        return local_intent
+def classify_question(question: str) -> dict:
+    import re
 
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return _fallback_intent(question)
+    # Normalize once so matching is case-insensitive and resilient to extra spacing.
+    text = re.sub(r"\s+", " ", (question or "").strip().lower())
 
-    client = Groq(api_key=api_key)
-    prompt = f"""
-You are a classifier for a SAP Order-to-Cash graph query system.
+    if not text:
+        return {"query_type": "unsupported"}
 
-Return only valid JSON with this exact shape:
-{{
-  "query_type": "trace_order" | "trace_invoice" | "find_orders_without_invoices" | "payment_status" | "full_lifecycle" | "unsupported",
-  "entity_id": "string or null"
-}}
+    # Fast regex for numeric identifiers. This keeps entity extraction deterministic
+    # and avoids depending on brittle exact phrases.
+    id_match = re.search(r"\b\d{4,}\b", text)
+    entity_id = id_match.group(0) if id_match else None
 
-Rules:
-- "trace_order" for order-specific tracing questions such as "show order 740506", "track order", or "order flow".
-- "trace_invoice" for invoice-specific tracing questions.
-- "find_orders_without_invoices" for questions about missing invoices.
-- "payment_status" for questions asking whether an order, invoice, or payment is paid, settled, pending, or open.
-- "full_lifecycle" for end-to-end flow questions across the whole order-to-cash lifecycle.
-- Use "unsupported" for anything outside the dataset.
-- entity_id should be the most relevant numeric id if present, otherwise null.
+    # Synonyms for intent detection.
+    # These rules exist to make the classifier robust to natural language variation
+    # without requiring exact prompt wording.
+    trace_words = r"(trace|track|follow|show|get|give|view|display|see|fetch)"
+    journey_words = r"(journey|flow|path|route|lifecycle|journey)"
+    invoice_words = r"(invoice|billing|bill)"
+    order_words = r"(order|orders|sales order|salesorder)"
+    invoice_missing_words = r"(don't have invoices|dont have invoices|without invoices|missing invoices|no invoices|lacking invoices|have no invoices)"
+    invoice_present_words = r"(with invoices|have invoices|has invoices|invoiced orders)"
+    payment_words = r"(payment|paid|settled|collection|cash)"
 
-Question: {question}
-"""
+    # 1) Missing-invoice detection must win early.
+    # This prevents questions like "Which orders don't have invoices?" from being
+    # misclassified as trace_order just because they mention "orders".
+    if re.search(order_words, text) and re.search(invoice_missing_words, text):
+        return {"query_type": "find_orders_without_invoices"}
 
-    try:
-        response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "Return only JSON."},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
-        )
-        content = response.choices[0].message.content or ""
-        data = json.loads(content)
-        return _merge_intent(question, data)
-    except Exception:
-        return _fallback_intent(question)
+    # 2) Orders with invoices.
+    # Useful for analytics-style questions about orders that already reached billing.
+    if re.search(order_words, text) and re.search(invoice_present_words, text):
+        return {"query_type": "find_orders_with_invoices"}
+
+    # 3) Invoice tracing.
+    # We look for invoice/billing wording plus a flow/journey/trace verb.
+    # This makes "Show me invoice flow" and "Track invoice 900540298" both work.
+    if re.search(invoice_words, text) and (
+        re.search(trace_words, text) or re.search(journey_words, text) or "flow" in text
+    ):
+        return {
+            "query_type": "trace_invoice",
+            "entity_id": entity_id,
+        }
+
+    # 4) Order tracing.
+    # We support flexible phrasing like:
+    # - "Give full journey of order 740506"
+    # - "Track this order"
+    # - "order flow"
+    # - "get order status"
+    if re.search(order_words, text) and (
+        re.search(trace_words, text) or re.search(journey_words, text) or "flow" in text or "status" in text
+    ):
+        return {
+            "query_type": "trace_order",
+            "entity_id": entity_id,
+        }
+
+    # 5) Payment status queries.
+    # Kept separate because they often sound like "payment status" rather than tracing.
+    if re.search(payment_words, text) and "status" in text:
+        return {
+            "query_type": "payment_status",
+            "entity_id": entity_id,
+        }
+
+    # 6) Flexible fallback for short queries.
+    # If the user says "track order" or "show invoice flow" without a numeric ID,
+    # we still return the intent with entity_id=None so the caller can prompt for it.
+    if re.search(order_words, text) and ("track" in text or "trace" in text or "flow" in text or "journey" in text):
+        return {"query_type": "trace_order", "entity_id": entity_id}
+
+    if re.search(invoice_words, text) and ("track" in text or "trace" in text or "flow" in text or "journey" in text):
+        return {"query_type": "trace_invoice", "entity_id": entity_id}
+
+    return {"query_type": "unsupported"}
