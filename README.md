@@ -449,6 +449,4 @@ D3 gives maximum flexibility but requires significant custom code for interactiv
 
 ## Author
 Vinit Sikri
-Built as part of a take-home assignment evaluating system design, AI-assisted development, and pragmatic engineering decisions.
 
-> *"We're evaluating your architectural decisions, your reasoning, and how effectively you use AI to arrive at them."*
