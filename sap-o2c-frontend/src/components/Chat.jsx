@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import GraphView from "./GraphView";
 
-const API_URL = "http://127.0.0.1:8000/query";
+const API_URL = "https://sap-o2c.onrender.com/query";
 
 const SUGGESTED_QUERIES = [
   "Trace order 740506",
